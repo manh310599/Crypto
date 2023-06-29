@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-
+import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
 import 'package:bloc_bitcon/model/crypto_symbols.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import '../common.dart';
 import '../model/data_model_price.dart';
 
@@ -26,22 +28,48 @@ class _ApiPageState extends State<ApiPage> {
   List<String> data = [];
 
   Future<void> fetchData() async {
-    final header = <String, String>{'X-Api-Key': '${apiKey}'};
-    final response = await http.get(
-        Uri.parse('https://api.api-ninjas.com/v1/cryptosymbols?'),
-        headers: header);
-    final data = CryptoSymbols.fromJson(jsonDecode(response.body));
-    final List<String> symbolData = data.symbols!;
-    print(symbolData.length);
+    String url = 'https://api.api-ninjas.com/v1/cryptosymbols?';
+    final header = <String, String>{'X-Api-Key': apiKey};
+    // Kiểm tra xem dữ liệu có trong cache hay không
+    File cachedFile = await DefaultCacheManager().getSingleFile(url,headers: header);
 
-    final sublist = symbolData.sublist(index, batchSize);
-    streamController.sink.add(sublist);
+    if (cachedFile.existsSync()) {
+      // Dữ liệu đã được lưu trữ trong cache
+      String cachedData = cachedFile.readAsStringSync();
+      final data = CryptoSymbols.fromJson(jsonDecode(cachedData));
+      final List<String> symbolData = data.symbols!;
 
-    coinPrice(sublist);
 
-    index = 10;
+      final sublist = symbolData.sublist(index, batchSize);
+      streamController.sink.add(sublist);
 
-    _isScrollEnd = true;
+      coinPrice(sublist);
+
+      index = 10;
+
+      _isScrollEnd = true;
+    } else {
+      // Dữ liệu không có trong cache
+      // Thực hiện các hành động khác, ví dụ: Gọi API để lấy dữ liệu mới
+
+      final response = await http.get(Uri.parse(url), headers: header);
+      final data = CryptoSymbols.fromJson(jsonDecode(response.body));
+      final List<String> symbolData = data.symbols!;
+
+
+      final sublist = symbolData.sublist(index, batchSize);
+      streamController.sink.add(sublist);
+
+      coinPrice(sublist);
+
+      index = 10;
+
+      _isScrollEnd = true;
+
+      String dataToCache = response.body;
+      Uint8List bytes = Uint8List.fromList(utf8.encode(dataToCache));
+      DefaultCacheManager().putFile(url, bytes); // Lưu trữ dữ liệu vào cache
+    }
   }
 
   @override
@@ -65,7 +93,7 @@ class _ApiPageState extends State<ApiPage> {
   ScrollController controller = ScrollController();
 
   console() async {
-    final header = <String, String>{'X-Api-Key': '${apiKey}'};
+    final header = <String, String>{'X-Api-Key': apiKey};
     final response = await http.get(
         Uri.parse('https://api.api-ninjas.com/v1/cryptosymbols?'),
         headers: header);
@@ -84,15 +112,46 @@ class _ApiPageState extends State<ApiPage> {
       coinPrice(sublist);
 
       _isScrollEnd = false;
-      await Future.delayed(Duration(seconds: 1));
+      await Future.delayed(const Duration(seconds: 1));
       _isScrollEnd = true;
 
       index = index + batchSize;
-      print(index);
     }
   }
 
   coinPrice(List<String> id) async {
+    // final List<DataModelPrice> dataTam = [];
+    // final heder = <String, String>{'X-Api-Key': apiKey};
+    // for (int i = 0; i < id.length; i++) {
+    //   final reponse = await http.get(
+    //       Uri.parse(
+    //           'https://api.api-ninjas.com/v1/cryptoprice?symbol=${id[i]}'),
+    //       headers: heder);
+    //   final data = DataModelPrice.fromJson(jsonDecode(reponse.body));
+    //
+    //   //await Future.delayed(Duration(milliseconds: 500));
+    //   dataTam.add(data);
+    // }
+    // streamPriceCoin.add(dataTam);
+    createIsolate(id);
+  }
+
+  void createIsolate(List<String> id) {
+    var receivePort = ReceivePort();
+    Isolate.spawn(taskRunner, {
+      'sendPort': receivePort.sendPort,
+      'id': id,
+    });
+
+    receivePort.listen((message) {
+      streamPriceCoin.add(message);
+    });
+  }
+
+  static Future<void> taskRunner(dynamic message) async {
+    var sendPort = message['sendPort'] as SendPort;
+    var id = message['id'] as List<String>;
+
     final List<DataModelPrice> dataTam = [];
     final heder = <String, String>{'X-Api-Key': apiKey};
     for (int i = 0; i < id.length; i++) {
@@ -105,9 +164,10 @@ class _ApiPageState extends State<ApiPage> {
       //await Future.delayed(Duration(milliseconds: 500));
       dataTam.add(data);
     }
-    streamPriceCoin.add(dataTam);
+    sendPort.send(dataTam);
   }
 
+  @override
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
 
@@ -117,7 +177,7 @@ class _ApiPageState extends State<ApiPage> {
         if (snapshot.hasData) {
           data.addAll(snapshot.data!);
           return Center(
-            child: Container(
+            child: SizedBox(
                 height: 500,
                 child: StreamBuilder<List<DataModelPrice>>(
                   builder: (context, snapshot) {
@@ -127,7 +187,7 @@ class _ApiPageState extends State<ApiPage> {
                           scrollDirection: Axis.horizontal,
                           controller: controller,
                           itemBuilder: (context, index) {
-                            return Container(
+                            return SizedBox(
                               height: 300,
                               width: width / 3,
                               child: Column(
@@ -136,19 +196,19 @@ class _ApiPageState extends State<ApiPage> {
                                     'assets/images/bitcoin.png',
                                     width: width / 5,
                                   ),
-                                  SizedBox(
+                                  const SizedBox(
                                     height: 10,
                                   ),
                                   Text(
                                     dataPrice[index].symbol.toString(),
-                                    style: TextStyle(fontSize: 15),
+                                    style: const TextStyle(fontSize: 15),
                                   ),
-                                  SizedBox(
+                                  const SizedBox(
                                     height: 10,
                                   ),
                                   Text(
-                                    dataPrice[index].price.toString() + "dola",
-                                    style: TextStyle(color: Colors.yellow),
+                                    "${dataPrice[index].price}dola",
+                                    style: const TextStyle(color: Colors.yellow),
                                   )
                                 ],
                               ),
@@ -156,7 +216,7 @@ class _ApiPageState extends State<ApiPage> {
                           },
                           itemCount: dataPrice.length);
                     } else {
-                      return Center(
+                      return const Center(
                         child: CircularProgressIndicator(),
                       );
                     }
@@ -165,7 +225,7 @@ class _ApiPageState extends State<ApiPage> {
                 )),
           );
         } else {
-          return Center(child: CircularProgressIndicator());
+          return const Center(child: CircularProgressIndicator());
         }
       },
     );
